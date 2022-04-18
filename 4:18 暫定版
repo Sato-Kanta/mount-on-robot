@@ -1,0 +1,1042 @@
+#define STRICT
+#define NOMINMAX
+#include <opencv2/core/utility.hpp>
+#include <opencv2/video/tracking.hpp>
+#include <opencv2/videoio.hpp> // videoioのヘッダーをインクルード
+#include <opencv2/highgui.hpp> // highguiのヘッダーをインクルード
+#include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <iostream>
+#include<string>
+#include<vector>
+#include<stdio.h>
+#include<math.h>
+#include "resource.h"
+#include<process.h>
+#include <windows.h>
+#include <windowsx.h>
+#include <tchar.h>
+#include "cserial.h"
+#include<opencv2/opencv.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/video.hpp>
+#include<cstring>
+#include <opencv2/imgcodecs.hpp>
+#include <numeric>      // std::iota
+#include <algorithm>    // std::sort, std::stable_sort
+#include <opencv2/video/background_segm.hpp>
+
+//CSerialインスタンスの宣言
+CSerial* cserial;
+//ダイアログ関数プロトタイプの宣言
+BOOL CALLBACK DlgWndProc(HWND, UINT, WPARAM, LPARAM);
+//WinAPI関連
+HWND hWnd;
+MSG msg;
+
+//カメラ関連
+unsigned int __stdcall camera(PVOID pv);
+HANDLE threadHandle = NULL;
+//--------------------------------------------
+// Name:WinMain()
+// Desc:アプリケーションのエントリー関数
+//--------------------------------------------
+
+int STATUS = 0, state = 0; //モード変数
+int Endflag = 0;
+int send_count = 0;
+int up_flag = 0, down_flag = 0, right_flag = 0, left_flag = 0;
+int diff[6];
+float X, Y;
+float TARGET_X, TARGET_Y;
+
+//pic-windows
+enum eCODE {
+	OFFSET, RESET,
+	START, STOP,
+	R_UP, R_DOWN,
+	L_UP, L_DOWN,
+	SPEED_UP, SPEED_DOWN,
+	SEND_DATA, DATA_CHECK,
+	NEUTRAL,
+	REMOVE_SCOPE, UP, DOWN, LEFT, RIGHT, BREAK,
+	STOP_YAW, STOP_PITCH, STOP_ZOOM
+};
+
+
+//--------------------------------------------
+// Name:DlgWndProc()
+// Desc:ダイアログ用ウィンドウプロシージャ
+//--------------------------------------------
+BOOL CALLBACK DlgWndProc(HWND hWnd, UINT iMsg, WPARAM wParam, LPARAM lParam)
+{
+	TCHAR szstr[256] = _T("");
+	DWORD dwThread;
+	static int roll_data, yaw_data, pitch_data;
+	static short int s_flag = 0;// ss_flag = 0;
+	static bool file_write = 0;		//ファイルに記録するかどうか
+	static int file_flag = 0, write_flag = 0;
+	SYSTEMTIME systime;//時間記録用
+
+	char FileName[127] = { "FILE_AD" };//ファイルの名前用の文字列
+
+	//変数の宣言
+	//シリアル通信用
+	int edit_data[28] = { 0 };	               //SEND_DATA用
+	int check_data[2] = { 0,0 };			   //通信確認用
+
+	//AD7150設定取得用
+	unsigned static int ch2_data = 0, ch2_critical = 10000;	//ch2_data:筋収縮センサの値 ch2_critical:閾値
+	unsigned static int ch1_data = 0, ch1_critical = 10000;	//ch1_data:加速度センサの値 ch1_critical:閾値
+	static int VR = 0;//可変抵抗用
+
+	static int speed_data = 0;//速度
+	static int senser_threshold_per = 0;//閾値
+
+	//グラフ表示関係
+	static int g_scale = 1;  //data*g_scalse/12 表示調整
+	//通信・ファイル出力操作用
+	static int flags = 1;
+
+	//カウンタ
+	unsigned static int time_count = 0, Off_count = 0;
+
+	//位置データ
+	int i;
+	static int operation_status = 5;
+	static int neutral_count = 0;
+	static int encoder_pitch_data = 0;
+	static int encoder_yaw_data = 0;
+	static int encoder_zoom_data = 0;
+	switch (iMsg)
+	{
+	case WM_INITDIALOG:
+		//ダイアログボックスが生成されたとき
+		Button_SetCheck(GetDlgItem(hWnd, IDC_BUTTON1), BST_CHECKED);
+		cserial = new CSerial; 							// Cserialクラスを取得
+		cserial->MakeBuffer(3, 28); 					// 送信用データを1byte、受信用データを4byte用意する。
+		if (cserial->GetComNum(NULL) == 0) {
+			MessageBox(hWnd, "接続を確認できません", "error", MB_OK);
+			PostQuitMessage(0);
+			//CSerialクラスの終了処理
+			delete cserial;
+			return 1;
+		}
+		//cserial->SetFindSerialPortName(0);
+		cserial->SetSerialPortName("COM7");
+		cserial->OpenSerialPort(); 					// シリアルポートをオープンする。
+		cserial->SetSerialPort(57600, 1024, 1024);	// ボーレイトの設定
+		cserial->SerialPortBufferClear(); 				// シリアルポートの送受信FIFOメモリをクリアする。
+		return TRUE;
+	case WM_COMMAND:
+
+		SendMessage(GetDlgItem(hWnd, IDC_EDIT1), WM_SETFONT, (WPARAM)CreateFont(50, 0, 0, 0, FW_REGULAR, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, PROOF_QUALITY, DEFAULT_PITCH, "ＭＳ Ｐゴシック"), MAKELPARAM(TRUE, 0));
+		switch (LOWORD(wParam))
+		{
+		case IDC_BUTTON1:
+			if (flags) {
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT1), _T("画面表示"));
+				SetTimer(hWnd, 1, 1, NULL);//通信系
+				SetTimer(hWnd, 2, 1, NULL);//表示系
+				if (threadHandle != NULL) break;
+				//スレッド起動
+				threadHandle = (HANDLE)_beginthreadex(NULL, 0, camera, NULL, 0, (unsigned int*)&dwThread);
+				flags = 0;
+
+			}
+			else {
+				KillTimer(hWnd, 1);
+				KillTimer(hWnd, 2);
+				flags = 1;
+			}
+			break;
+		case IDC_BUTTON2:
+			SetWindowText(GetDlgItem(hWnd, IDC_EDIT1), _T("確認"));
+			STATUS = 0;
+			send_count = 2;
+			break;
+		case IDC_BUTTON3:
+
+			if (state == 1) {
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT1), _T("left"));
+				send_count = 3;
+			}
+			else if (state == 2) {
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT1), _T("right"));
+				send_count = 4;
+			}
+			else if (state == 3) {
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT1), _T("up"));
+				send_count = 5;
+			}
+			else if (state == 4) {
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT1), _T("down"));
+				send_count = 6;
+			}
+			else if (state == 5) {
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT1), _T("ニュートラル"));
+				send_count = 19;
+			}
+			STATUS = 2;
+			break;
+		case IDC_BUTTON4:
+			state = 1;
+			break;
+		case IDC_BUTTON5:
+			state = 2;
+			break;
+		case IDC_BUTTON6:
+			state = 3;
+			break;
+		case IDC_BUTTON7:
+			state = 4;
+			break;
+		case IDC_BUTTON9:
+			state = 5;
+			break;
+		case IDC_BUTTON8:
+			STATUS = 1;
+			send_count = 1;
+			break;
+		}
+		return TRUE;
+	case WM_TIMER:
+		switch (LOWORD(wParam)) {
+		case 1:
+
+			/*========================receive data========================================================-*/
+			cserial->m_senddata[0] = (unsigned char)SEND_DATA;				//確認用データを代入する。
+			cserial->SerialPortBufferClear();
+			cserial->SendSerialData(1);										//確認用データを送信する。
+			cserial->ReceiveSerialData(28);//0815
+			//とりあえず28byte分のデータを受け取る
+			for (i = 0; i < 28; i++) {
+				edit_data[i] = cserial->m_receivedata[i];
+			}
+			if ((edit_data[0] == DATA_CHECK) && (edit_data[27] == DATA_CHECK)) {//0と27番目のデータは確認用
+
+				edit_data[2] <<= 8;				//1byte目と2バイト目は可変抵抗の値
+				edit_data[1] |= edit_data[2];
+				VR = edit_data[1] - 3000;
+
+				edit_data[4] <<= 8;				//3バイト目と4byte目はhead_L（側頭筋収縮センサ）
+				edit_data[3] |= edit_data[4];
+				ch2_data = edit_data[3];
+
+				edit_data[6] <<= 8;				//5,6byte目はロール角
+				edit_data[5] |= edit_data[6];
+				roll_data = edit_data[5];
+
+				edit_data[8] <<= 8;				//7,8byteはヨー角
+				edit_data[7] |= edit_data[8];
+				yaw_data = edit_data[7];
+
+				edit_data[10] <<= 8;
+				edit_data[9] |= edit_data[10];	//9,10byte目はピッチ角
+				pitch_data = edit_data[9];
+
+				edit_data[12] <<= 8;			//L_critical(L閾値)
+				edit_data[11] |= edit_data[12];
+				ch2_critical = edit_data[11];
+
+				edit_data[14] <<= 8;			//head_R (側頭筋収縮センサ)
+				edit_data[13] |= edit_data[14];
+				//xxx = edit_data[13];
+
+				edit_data[16] <<= 8;			//speed_data
+				edit_data[15] |= edit_data[16];
+				speed_data = edit_data[15];
+
+				edit_data[18] <<= 8;			//未使用
+				edit_data[17] |= edit_data[18];
+				senser_threshold_per = edit_data[17];
+
+				edit_data[20] <<= 8;			//19,20byte目はピッチエンコーダの値
+				edit_data[19] |= edit_data[20];
+				encoder_pitch_data = edit_data[19];
+
+				edit_data[22] <<= 8;			//21,22byte目はヨーエンコーダの値
+				edit_data[21] |= edit_data[22];
+				encoder_yaw_data = edit_data[21];
+
+				edit_data[24] <<= 8;			//23,24byte目はズームエンコーダの値
+				edit_data[23] |= edit_data[24];
+				encoder_zoom_data = edit_data[23];
+
+				edit_data[26] <<= 8;            //25,26byte目は運用状態
+				edit_data[25] |= edit_data[26];
+				operation_status = edit_data[25];
+			}
+
+
+			/*===================================seda data==================================================*/
+			switch (send_count) {
+			case 1:	//マスターにSTRATという値を送る
+				cserial->m_senddata[0] = (unsigned char)START;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				operation_status = 1;
+				send_count = 0;
+				break;
+
+			case 2://マスターにSTOPという値を送る
+				cserial->m_senddata[0] = (unsigned char)STOP;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 19://マスターにNEUTRALという値を送る
+				cserial->m_senddata[0] = (unsigned char)NEUTRAL;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 20://マスターにREMOVE_SCOPEという値を送る
+				cserial->m_senddata[0] = (unsigned char)REMOVE_SCOPE;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 3:
+				cserial->m_senddata[0] = (unsigned char)LEFT;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+			case 4:
+				cserial->m_senddata[0] = (unsigned char)RIGHT;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+			case 5:
+				cserial->m_senddata[0] = (unsigned char)UP;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+			case 6:
+				cserial->m_senddata[0] = (unsigned char)DOWN;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+			case 7:
+				cserial->m_senddata[0] = (unsigned char)BREAK;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+			}
+
+			return 1;
+
+		case 2:
+
+			SetDlgItemInt(hWnd, IDC_encoder_pitch, encoder_pitch_data, 1);//pitch location
+			SetDlgItemInt(hWnd, IDC_encoder_yaw, encoder_yaw_data, 1);//yow location
+			SetDlgItemInt(hWnd, IDC_encoder_zoom, encoder_zoom_data, 1);//zoom location
+
+			//状態表示　初期値は3
+			switch (operation_status) {
+			case 0:
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT2), _T("BREAK"));
+				break;
+			case 1:
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT2), _T("PITCH"));
+				break;
+			case 2:
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT2), _T("YAW"));
+				break;
+			case 3:
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT2), _T("ZOOM IN"));
+				break;
+			case 4:
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT2), _T("ZOOM OUT"));
+				break;
+			case 5:
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT2), _T("now config"));
+				break;
+			}
+			return 1;
+		}
+		break;
+		// ×ボタンをクリックしたときの処理
+	case WM_CLOSE:
+		//ダイアログを破棄
+		DestroyWindow(hWnd);
+		//fclose(fp0);//ファイルを閉じる
+		return 1;
+
+		//終了(ウィンドウを閉じた後の)処理
+	case WM_DESTROY:
+		PostQuitMessage(0);
+		//CSerialクラスの終了処理
+		delete cserial;
+		return 1;
+
+	default:
+		return FALSE;
+	}
+}
+
+using namespace cv;
+using namespace std;
+
+int xb = 0, yb = 0;
+int xq = 0, yq = 0;
+
+#ifdef _DEBUG
+#pragma comment(lib, "opencv_world452d.lib")
+#else
+#pragma comment(lib, "opencv_world452.lib")
+#endif
+
+cv::Point minPoint(vector<cv::Point> contours) {
+	double minx = contours.at(0).x;
+	double miny = contours.at(0).y;
+	for (int i = 1; i < contours.size(); i++) {
+		if (minx > contours.at(i).x) {
+			minx = contours.at(i).x;
+		}
+		if (miny > contours.at(i).y) {
+			miny = contours.at(i).y;
+		}
+	}
+	return cv::Point(minx, miny);
+}
+//最大座標を求める
+cv::Point maxPoint(vector<cv::Point> contours) {
+	double maxx = contours.at(0).x;
+	double maxy = contours.at(0).y;
+	for (int i = 1; i < contours.size(); i++) {
+		if (maxx < contours.at(i).x) {
+			maxx = contours.at(i).x;
+		}
+		if (maxy < contours.at(i).y) {
+			maxy = contours.at(i).y;
+		}
+	}
+	return cv::Point(maxx, maxy);
+}
+
+Mat mask1(Mat img) {
+	Mat mask, mask2, bgf1;
+	int White = 0;
+	Mat kernel = getStructuringElement(cv::MORPH_RECT, cv::Size(21, 21));
+
+	//inRange(img, Scalar(28, 64, 0), Scalar(77, 255, 255), mask);
+	inRange(img, Scalar(24, 64, 0), Scalar(81, 255, 255), mask);
+	morphologyEx(mask, mask2, MORPH_OPEN, kernel);
+	for (int i = 0; i < 3; i++) {
+		morphologyEx(mask2, mask2, MORPH_OPEN, kernel);
+		medianBlur(mask2, mask2, 5);
+	}
+	threshold(mask2, bgf1, 120, 255, THRESH_BINARY);
+	return bgf1;
+}
+
+Mat mask2(Mat img) {
+	Mat mask3, mask4, bgf2;
+	Mat kernel = getStructuringElement(cv::MORPH_RECT, cv::Size(21, 21));
+	inRange(img, Scalar(133, 64, 0), Scalar(182, 255, 255), mask3);
+	//inRange(img, Scalar(129, 64, 0), Scalar(186, 255, 255), mask3);
+	morphologyEx(mask3, mask4, MORPH_OPEN, kernel);
+	for (int i = 0; i < 3; i++) {
+		morphologyEx(mask4, mask4, MORPH_OPEN, kernel);
+		medianBlur(mask4, mask4, 5);
+	}
+	threshold(mask4, bgf2, 120, 255, THRESH_BINARY);
+	return bgf2;
+}
+
+Mat Optical(Mat img1, Mat img2) {
+	Mat flow(img1.size(), CV_32FC2);
+	calcOpticalFlowFarneback(img1, img2, flow, 0.5, 3, 17, 3, 5, 1.1, 0);
+	Mat flow_copy;
+	//GaussianBlur(flow, flow_copy, cv::Size(3, 3), 0, 0);
+	// visualization
+	Mat flow_parts[2];
+	split(flow, flow_parts);
+	//split(flow_copy, flow_parts);
+
+	//split(flow, flow_parts);
+	Mat magnitude, angle, magn_norm;
+	cartToPolar(flow_parts[0], flow_parts[1], magnitude, angle, true);
+	normalize(magnitude, magn_norm, 0.0f, 1.0f, NORM_MINMAX);
+	//imshow("an", magn_norm);
+
+	angle *= ((1.f / 360.f) * (180.f / 255.f));
+	//build hsv image
+	Mat _hsv[3], hsv, hsv8, bgr;
+	_hsv[0] = angle;
+	_hsv[1] = Mat::ones(angle.size(), CV_32F);
+	_hsv[2] = magn_norm;
+
+	Mat h1, h2, h12;
+	threshold(_hsv[0], h1, 60, 360, THRESH_BINARY);
+
+	threshold(_hsv[0], h2, 120, 360, THRESH_BINARY);
+	bitwise_or(h1, h2, h12);
+	merge(_hsv, 3, hsv);
+	hsv.convertTo(hsv8, CV_8U, 255.0);
+
+	return hsv8;
+}
+
+vector<vector<Point>> contours(Mat img) {
+	vector< vector<cv::Point> > contours;
+	vector< vector<cv::Point> > contours_subset;
+	vector<cv::Vec4i> hierarchy;
+	cv::findContours(img, contours, hierarchy, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+	for (auto contour = contours.begin(); contour != contours.end(); contour++) {
+		for (int i = 0; i < contours.size(); i++) {
+			double area1 = 0;
+			area1 = contourArea(contours.at(i));
+			if (area1 > 23 && area1 < 40) {
+				contours_subset.push_back(contours.at(i));
+			}
+		}
+	}
+	return contours_subset;
+}
+
+Point center(Point max, Point min, Point MAX, Point MIN) {
+	Point v;
+	int k = 0;
+	double s1 = 0, s2 = 0;
+	int P1X = MIN.x;
+	int P1Y = MIN.y;
+	int P2Y = min.y;
+	int P2X = min.x;
+	int P3X = MAX.x;
+	int P3Y = MAX.y;
+	int P4Y = max.y;
+	int P4X = max.x;
+
+	s1 = ((P4X - P2X) * (P1Y - P2Y) - (P4Y - P2Y) * (P1X - P2X)) / 2;
+	s2 = ((P4X - P2X) * (P2Y - P3Y) - (P4Y - P2Y) * (P2X - P3X)) / 2;
+
+	v = cv::Point(0, 0);
+	v.x = P1X + ((double)P3X - (double)P1X) * s1 / (s1 + s2);
+	v.y = P1Y + ((double)P3Y - (double)P1Y) * s1 / (s1 + s2);
+
+	return v;
+}
+
+cv::Mat templateMatch(cv::Mat src, cv::Mat tmp, cv::Mat frame) {
+
+	int count = 0;
+	int sumx = 0, sumy = 0;
+	const int __TARGET_NUM__ = 30;
+	cv::Mat output, dst;
+	//dst = src.clone();
+	dst = frame.clone();
+	//テンプレートマッチング
+	cv::matchTemplate(src, tmp, output, cv::TM_CCOEFF);
+	//0~1の値に標準化
+	cv::normalize(output, output, 0, 1, cv::NORM_MINMAX, -1, cv::Mat());
+	//2次元から1次元へ変換
+	cv::Mat one_row = output.reshape(1, 1);
+
+	std::vector<float> one_row_vec;
+	std::vector<float> one_row_index;
+
+	//cv::Mat -> std::vector に変換
+	one_row_vec.assign(one_row.begin<float>(), one_row.end<float>());
+	std::vector<int> index(one_row_vec.size());
+
+	//ソートインデックス配列用に整数列を作成する(0,1,2,3,4,5......)
+	std::iota(index.begin(), index.end(), 0);
+
+	//ソートをかける
+	std::sort(index.begin(), index.end(), [&](int a, int b) {return one_row_vec[a] > one_row_vec[b]; });
+
+	for (int i = 0; i < __TARGET_NUM__; i++) {
+		//std::cout << index[i] << ":" << one_row_vec[index[i]] << std::endl;
+		if (one_row_vec[index[i]] > 0.999) {
+
+			// 1次元から2次元に変換 
+			int x = index[i] % output.cols;
+			int y = index[i] / output.cols;
+
+			///if (abs(x - xb) < 10 || abs(y - yb) < 10) {
+
+			cv::Rect roi_rect = cv::Rect(x, y, tmp.cols, tmp.rows);
+			cv::rectangle(dst, roi_rect, cv::Scalar(0, 255, 255), 3);
+			//printf("%lf\n", one_row_vec[index[i]]);
+			xb = x;
+			yb = y;
+			//}
+			//fprintf(fp, "%d,%d\n", xb, yb);
+
+
+		}
+	}
+	return dst;
+}
+
+Mat Bit_Wise(Mat img1, Mat img2, Mat img3) {
+	Mat img1_gry, img2_gry, img3_gry, img_gryA, img_gryB, img_gry;
+	cvtColor(img1, img1_gry, COLOR_BGR2GRAY);
+	cvtColor(img2, img2_gry, COLOR_BGR2GRAY);
+	cvtColor(img3, img3_gry, COLOR_BGR2GRAY);
+	absdiff(img1_gry, img2_gry, img_gryA);
+	absdiff(img1_gry, img2_gry, img_gryB);
+	bitwise_and(img_gryA, img_gryB, img_gry);
+
+	return img_gry;
+}
+
+//画像処理関数
+//int main(int argc, const char* argv[])
+unsigned int __stdcall camera(PVOID pv)
+{
+
+	//VideoCapture capture("WIN_20211111_12_16_19_Pro_Trim.mp4");
+	VideoCapture capture(0);
+	VideoWriter writer;
+	VideoWriter writer2;
+
+	int width, height, fourcc;
+	double fps, fps1;
+	fourcc = cv::VideoWriter::fourcc('X', 'V', 'I', 'D');
+	//fourcc = cv::VideoWriter::fourcc('m', 'p', '4', 'v');
+	width = (int)capture.get(cv::CAP_PROP_FRAME_WIDTH);
+	height = (int)capture.get(cv::CAP_PROP_FRAME_HEIGHT);
+	//fps1 = capture.get(cv::CAP_PROP_FPS);
+	fps = 5.0;
+	int k = 0, l = 0;
+	int c = 0, cc = 0, e = 0;
+	int p = 0;
+	int sigma = 5, border = 9;
+	int roi_width = 120, roi_height = 90, height_arrange = 30;
+	int w = 0, ww = 0, s = 0;
+	double processtime = 0;
+	vector<cv::Point> v(1000);
+	vector<Point> Gv(11);
+	Point Gs=Point(0,0);
+	vector<int> count(10);
+	vector<int> white(6);
+	vector<int> white_tmp(6);
+	int White = 0;
+	int White_tmp = 0;
+	int white_sum = 0;
+	int white_sum_tmp = 0;
+	
+	int diff_Flag = 0;
+	int origin_White = 0;
+
+	vector<double> distance(3);
+
+	//writer.open("Video.mp4", fourcc, fps, cv::Size(width, height));
+	writer.open("CloneVideo.avi", fourcc, fps, cv::Size(width, height), false);
+	if (!capture.isOpened()) {
+		//error in opening the video input
+		cerr << "Unable to open file!" << endl;
+		return 0;
+	}
+
+	Mat frame1, prvs, prvs1, prvs11;
+	//Mat frame2, space, space1,space11;
+	capture >> frame1;
+	Rect selection(30, 120, 400, 350);
+	Mat copy1, copy2;
+	Mat edge_img;
+
+	frame1 = frame1(selection);
+
+	cvtColor(frame1, prvs1, COLOR_BGR2GRAY);
+	copy1 = prvs1.clone();//差分用1
+	//blur(prvs1,prvs1,Size(5,5));
+	medianBlur(prvs1, prvs1, 5);
+	bilateralFilter(prvs1, prvs11, 5, sigma, border);
+	bilateralFilter(prvs11, prvs, 5, sigma, border);
+
+	Mat frame2, frame3,frame4;
+	Point G = cv::Point(0, 0);
+	for (;;) {
+		DWORD start = GetTickCount64();
+		for (;;) {
+			for (;;) {
+				if (state == 2) {
+					DestroyWindow(hWnd);
+					break;
+				}
+				int c = 0;
+				if (STATUS == 0) {
+					for (;;) {
+						capture >> frame2;
+						imshow("Tracking", frame2);
+						waitKey(1);
+						//if(waitKey(10)=='q'){
+						if (STATUS == 1 || state == 2) {
+							destroyWindow("Tracking");
+							break;
+						}
+					}
+				}
+				if (STATUS == 1) {
+					break;
+				}
+			}
+			//動体検出部
+			for (;;) {
+				Mat next, next1, next11;
+				Mat diffimg;
+				Mat bin_img;
+
+				vector< vector<cv::Point> > contours_subset1;
+				vector< vector<cv::Point> > contours_subset2;
+				cv::Point minP1 = cv::Point(0, 0);
+				cv::Point maxP1 = cv::Point(0, 0);
+				cv::Point minP2 = cv::Point(0, 0);
+				cv::Point maxP2 = cv::Point(0, 0);
+				cv::Point imminP1 = cv::Point(0, 0);
+				cv::Point immaxP1 = cv::Point(0, 0);
+				cv::Point imminP2 = cv::Point(0, 0);
+				cv::Point immaxP2 = cv::Point(0, 0);
+
+				int keyboard = waitKey(10);
+				waitKey(1);
+				//capture >> frame2;
+				capture >> frame2;
+				frame3 = frame2.clone();//描画用の画像
+				frame4 = frame2.clone();//受け渡し用
+				if (frame2.empty())
+					break;
+
+				frame2 = frame2(selection);
+
+				cvtColor(frame2, next1, COLOR_BGR2GRAY);
+				copy2 = next1.clone();//差分用2
+				absdiff(copy1, copy2, diffimg);//差分画像生成
+				threshold(diffimg, bin_img, 120, 255, THRESH_BINARY);//差分二値画像
+				int shiro = countNonZero(bin_img);
+				white.at(w) = shiro;
+				//printf("hite=%d\n", white.at(w));
+				//printf("shiro=%d\n", shiro);
+				white_sum += white.at(w);
+				w++;
+
+				if (w > 5) {
+					white_sum = white_sum - white.at(0);
+					w = 0;
+					White = white_sum / 5;
+					//printf("White_sum=%d\n", white_sum);
+					printf("White=%d\n", White);
+					white_sum = 0;
+
+				}
+
+				if (White > 300) {//鉗子遠め
+					sigma = 7;
+					border = 5;
+					roi_width = 140;
+					roi_height = 100;
+					height_arrange = 30;
+				}
+				else {//鉗子近め
+					sigma = 5;
+					border = 9;
+					roi_width = 90;
+					roi_height = 60;
+					height_arrange = 20;
+				}
+
+				medianBlur(next1, next1, 5);
+				bilateralFilter(next1, next11, 5, sigma, border);
+				bilateralFilter(next11, next, 5, sigma, border);
+
+				edge_img = next.clone();//エッジ用画像生成
+
+				Mat bgr;
+				Mat hsv8 = Optical(prvs, next);
+				//Mat hsv8 = Optical(diffA, diffB);
+				Mat bgf1 = mask1(hsv8);
+				Mat bgf2 = mask2(hsv8);
+
+				Canny(edge_img, edge_img, 10, 15, 3, true);//エッジ強調
+				bitwise_and(edge_img, bgf1, bgf1);
+				bitwise_and(edge_img, bgf2, bgf2);
+
+				contours_subset1 = contours(bgf1);
+				contours_subset2 = contours(bgf2);
+				for (int i = 0; i < contours_subset1.size(); i++) {
+					minP1 = minPoint(contours_subset1.at(i));
+					maxP1 = maxPoint(contours_subset1.at(i));
+
+					minP1.x = minP1.x + 30.0;
+					minP1.y = minP1.y + 120.0;
+
+					maxP1.x = maxP1.x + 30.0;
+					maxP1.y = maxP1.y + 120.0;
+					imminP1 = minP1;
+					immaxP1 = maxP1;
+				}
+
+				for (int i = 0; i < contours_subset2.size(); i++) {
+					minP2 = minPoint(contours_subset2.at(i));
+					maxP2 = maxPoint(contours_subset2.at(i));
+
+					minP2.x = minP2.x + 30.0;
+					minP2.y = minP2.y + 120.0;
+
+					maxP2.x = maxP2.x + 30.0;
+					maxP2.y = maxP2.y + 120.0;
+					imminP2 = minP2;
+					immaxP2 = maxP2;
+				}
+
+				//rectangle(frame3,selection,Scalar(100,100,0),2);
+				//if (minP1 != cv::Point(0, 0) && minP2 != cv::Point(0, 0) && maxP1 != cv::Point(0, 0) && maxP2 != cv::Point(0, 0)) {
+				if (minP1.x > 30 && minP2.x > 30 && maxP1.x < 430 && maxP2.x < 430) {
+
+					if (minP1.y < minP2.y) {
+						imminP1.y = minP1.y + 20.0;
+						immaxP1.y = maxP1.y - 20.0;
+					}
+					else {
+						imminP2.y = minP2.y - 20.0;
+						immaxP2.y = maxP2.y + 20.0;
+					}
+					cv::line(frame3, imminP1, immaxP1, cv::Scalar(0, 255, 0), 4, 8);
+					cv::line(frame3, imminP2, immaxP2, cv::Scalar(0, 0, 255), 4, 8);
+
+
+					v.at(k) = center(immaxP1, imminP1, immaxP2, imminP2);
+					if (v.at(k).x < 30 || v.at(k).y < 120 || v.at(k).x > 400 || v.at(k).y > 450)
+						//if (v.at(k).x < 0 || v.at(k).y < 0 || v.at(k).x > 700 || v.at(k).y > 450)
+						continue;
+
+					cv::circle(frame3, v.at(k), 10, Scalar(105, 155, 55), 3, 8);
+					//printf("%d,%d\n", v.at(k).x, v.at(k).y);
+					G.x += v.at(k).x;
+					G.y += v.at(k).y;
+
+					if (0 <= k && k < 3) {
+						Gv.at(c).x = G.x / (k + 1);
+						Gv.at(c).y = G.y / (k + 1);
+						c++;
+					}
+					else if (3 <= k && k < 6) {
+						//if (abs(v.at(k).x - Gv.at(c).x) > 200 && abs(v.at(k).y - Gv.at(c).y) > 200)
+							//continue;
+
+						Gv.at(c).x = G.x / (k + 1);
+						Gv.at(c).y = G.y / (k + 1);
+
+						for (int i = 0; i < 3; i++) {
+							if ((Gv.at(c).x > Gv.at(i).x - 10 && Gv.at(c).x < Gv.at(i).x + 10) && (Gv.at(c).y > Gv.at(i).y - 10 && Gv.at(c).y < Gv.at(i).y + 10)) {
+								if (Gv.at(i).x != 0 && Gv.at(i).y != 0) {
+									count.at(i) += 1;
+								}
+							}
+						}
+						c++;
+					}
+
+					if (k == 5) {
+						int max = *std::max_element(count.begin(), count.end());
+						std::vector<int>::iterator maxIt = std::max_element(count.begin(), count.end());
+						size_t maxIndex = std::distance(count.begin(), maxIt);
+						l = maxIndex;
+					}
+					printf("k=%d\n", k);
+					k++;
+
+					if (k == 6 && Gv.at(l) != cv::Point(0, 0) && Gv.at(l).x < 700 && Gv.at(l).y < 480/* && abs(Gv.x - G.x)<100 && abs(Gv.y - G.y) < 100*/) {
+						cv::circle(frame3, Gv.at(l), 15, Scalar(255, 0, 255), 3, 8);
+						//printf("%d,%d,%d\n", count.at(0), count.at(1), count.at(2));
+						printf("%d,%d\n", Gv.at(l).x, Gv.at(l).y);
+						printf("%d\n", l);
+						Rect roi(Gv.at(l).x, Gv.at(l).y - height_arrange, roi_width, roi_height);
+						rectangle(frame3, roi, cv::Scalar(0, 0, 255), 3);
+						e++;
+						putText(frame3, "DETECT!!", cv::Point(200, 100), cv::FONT_ITALIC, 1.2, cv::Scalar(255, 0, 0), 3);
+						Gs = Gv.at(l);
+						k = 0;
+						G = Point(0, 0);
+						Gv.at(l) = Point(0, 0);
+						count = { 0,0,0 };
+						c = 0;
+
+						imshow("%d", frame3);
+
+					}
+					cvtColor(hsv8, bgr, COLOR_HSV2BGR);
+				}
+				//imshow("a", copy2);
+				imshow("image", frame3);
+
+				if (keyboard == 'q' || keyboard == 27) {
+					break;
+				}
+				DWORD end = GetTickCount64();
+				processtime = ((double)(end - start) / 1000);
+
+				if (e > 2) {
+					destroyWindow("image");
+					destroyWindow("%d");
+					break;
+				}
+
+				prvs = next;
+				frame1 = frame2;
+				copy1 = copy2;
+			}
+
+			cserial->m_senddata[0] = (unsigned char)START;
+			cserial->SerialPortBufferClear();
+			cserial->SendSerialData(1);
+			send_count = 0;
+
+			//切り取り領域取得と処理
+			Rect roi(Gs.x, Gs.y - 30, 120, 90);
+			Mat tmp = frame4(roi);
+			Mat tmp_gry, binarytmp, tmp_gry1;
+			Mat edge_roi, tmp_roi;
+
+
+			Mat image, image_gry, image_gry1;
+			Mat diff;
+			cvtColor(tmp, tmp_gry, COLOR_BGR2GRAY);
+			bilateralFilter(tmp_gry, tmp_gry1, 17, 40, 5);
+			Canny(tmp_gry1, edge_roi, 50, 100, 3);
+
+			for (;;) {
+				Mat img1, img2, img3,src;
+				Mat bin_img, bin_img2;
+				Mat img1_gry, img1_gry1;
+				Mat edge;
+				capture >> img1;
+				capture >> img3;
+				capture >> img2;
+				src = img3.clone();
+
+				Mat img_gry = Bit_Wise(img1, img2, img3);
+				edge = img_gry.clone();
+				Canny(edge, edge, 50, 100, 3, true);
+
+				cv::threshold(edge, bin_img, 120, 255, THRESH_BINARY);//差分二値画像
+				int shiro_tmp = countNonZero(edge);
+				white_tmp.at(ww) = shiro_tmp;
+				white_sum_tmp += white_tmp.at(ww);
+				ww++;
+				if (ww == 3) {
+					s = 1;
+					White_tmp = white_sum_tmp / 3;
+					printf("White=%d\n", White_tmp);
+					white_sum_tmp = 0;
+					white_tmp = { 0,0,0 };
+					ww = 0;
+					cc++;
+				}
+
+				if (White_tmp < 100) {
+					diff_Flag = 1;
+				}
+				else {
+					diff_Flag = 0;
+				}
+
+				if (cc == 1) {
+					origin_White = White_tmp;
+				}
+
+				bin_img2 = bin_img.clone();
+				dilate(bin_img, bin_img2, 10);
+				xq = xb;
+				yq = yb;
+				cv::Mat dst = templateMatch(edge, edge_roi, src);
+				//枠越え表示
+				if (s == 1) {
+					if (xb - xq < -15) {
+						cv::putText(dst, "Left Over", cv::Point(300, 400), cv::FONT_ITALIC, 1.2, cv::Scalar(255, 200, 100), 2);
+						left_flag = 1;
+						cserial->m_senddata[0] = (unsigned char)LEFT;
+						cserial->SerialPortBufferClear();
+						cserial->SendSerialData(1);
+						send_count = 3;
+					}
+					else if (xb - xq > 15) {
+						cv::putText(dst, "Right Over", cv::Point(300, 400), cv::FONT_ITALIC, 1.2, cv::Scalar(255, 200, 100), 2);
+						right_flag = 1;
+						cserial->m_senddata[0] = (unsigned char)RIGHT;
+						cserial->SerialPortBufferClear();
+						cserial->SendSerialData(1);
+						send_count = 4;
+					}
+					else if (yb - yq < -10) {
+						cv::putText(dst, "Up Over", cv::Point(300, 400), cv::FONT_ITALIC, 1.2, cv::Scalar(255, 200, 100), 2);
+						up_flag = 1;
+						cserial->m_senddata[0] = (unsigned char)UP;
+						cserial->SerialPortBufferClear();
+						cserial->SendSerialData(1);
+						send_count = 5;
+					}
+					else if (yb - yq > 10) {
+						cv::putText(dst, "Down Over", cv::Point(300, 400), cv::FONT_ITALIC, 1.2, cv::Scalar(255, 200, 100), 2);
+						down_flag = 1;
+						cserial->m_senddata[0] = (unsigned char)DOWN;
+						cserial->SerialPortBufferClear();
+						cserial->SendSerialData(1);
+						send_count = 6;
+					}
+					else {
+						cv::putText(dst, "Stop", cv::Point(300, 100), cv::FONT_ITALIC, 1.2, cv::Scalar(55, 200, 100), 2);
+						cserial->m_senddata[0] = (unsigned char)BREAK;
+						cserial->SerialPortBufferClear();
+						cserial->SendSerialData(1);
+						send_count = 7;
+					}
+
+					if (diff_Flag == 0 && origin_White - White < -400) {
+						cv::putText(dst, "near by", cv::Point(300, 100), cv::FONT_ITALIC, 1.2, cv::Scalar(55, 200, 100), 2);
+					}
+					else if (diff_Flag == 0 && origin_White - White > 400) {
+						cv::putText(dst, "far away", cv::Point(300, 100), cv::FONT_ITALIC, 1.2, cv::Scalar(55, 200, 100), 2);
+					}
+					else {
+						cv::putText(dst, "Stop", cv::Point(300, 100), cv::FONT_ITALIC, 1.2, cv::Scalar(55, 200, 100), 2);
+						cserial->m_senddata[0] = (unsigned char)BREAK;
+						cserial->SerialPortBufferClear();
+						cserial->SendSerialData(1);
+						send_count = 7;
+					}
+				}
+				s = 0;
+
+				imshow("output.png", dst);
+				//imshow("black", edge);
+				//imshow("text", src);
+				imshow("png", edge_roi);
+				waitKey(1);
+
+			}
+		}
+	}
+	return 0;
+}
+
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR szStr, int iCmdShow)
+{
+	//モーダルダイアログボックスを作成
+	DialogBox(
+		hInst,
+		MAKEINTRESOURCE(IDD_DIALOG1),
+		NULL,
+		(DLGPROC)DlgWndProc);
+
+	while (GetMessage(&msg, NULL, 0, 0))
+	{
+		TranslateMessage(&msg); // キーボードメッセージを変換する
+		DispatchMessage(&msg);  // 1つのウィンドウプロシージャにメッセージを送る
+	}
+	return msg.wParam;
+	//return 0;
+
+}
