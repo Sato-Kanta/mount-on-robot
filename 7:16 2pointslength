@@ -1408,7 +1408,10 @@ unsigned int __stdcall camera(PVOID pv)
 						yb = yb - 2;
 					}
 				}
-				
+				else {
+					putText(dst, "Stop", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+					stop_flag1 = 1;
+				}
 
 				if (flag_near == 1) {
 					
