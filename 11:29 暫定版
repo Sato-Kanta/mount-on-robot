@@ -1,0 +1,1758 @@
+#define STRICT
+#define NOMINMAX
+#include <opencv2/core/utility.hpp>
+#include <opencv2/video/tracking.hpp>
+#include <opencv2/videoio.hpp> // videoioのヘッダーをインクルード
+#include <opencv2/highgui.hpp> // highguiのヘッダーをインクルード
+#include <opencv2/imgproc.hpp>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc/imgproc_c.h>
+#include <opencv2/highgui/highgui_c.h>
+#include<opencv2/objdetect/detection_based_tracker.hpp>
+#include <iostream>
+#include<string>
+#include<vector>
+#include<stdio.h>
+#include<math.h>
+#include "resource.h"
+#include<process.h>
+#include <windows.h>
+#include <windowsx.h>
+#include <tchar.h>
+#include "cserial.h"
+#include<opencv2/opencv.hpp>
+#include <opencv2/core.hpp>
+#include <opencv2/video.hpp>
+#include<cstring>
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/tracking.hpp>
+#include <numeric>      // std::iota
+#include <algorithm>    // std::sort, std::stable_sort
+#include <opencv2/video/background_segm.hpp>
+#include <functional>
+#include<stdlib.h>　//WM＿TIMERの精度が心配な時
+#include<time.h>　　//WM＿TIMERの精度が心配な時
+
+//CSerialインスタンスの宣言
+CSerial* cserial;
+//ダイアログ関数プロトタイプの宣言
+//BOOL CALLBACK DlgWndProc(HWND, UINT, WPARAM, LPARAM);
+BOOL CALLBACK DlgWndProc(HWND, UINT, WPARAM, LPARAM);
+//WinAPI関連
+HWND hWnd;
+MSG msg;
+
+//カメラ関連
+
+unsigned int __stdcall camera(PVOID pv);
+HANDLE threadHandle = NULL;
+//--------------------------------------------
+// Name:WinMain()
+// Desc:アプリケーションのエントリー関数
+//--------------------------------------------
+
+#define PI 3.141592
+static int operation_status = 5;
+int STATUS = 0, state = 0; //モード変数
+int Endflag = 0;
+int send_count = 0;
+int up_flag = 0, down_flag = 0, right_flag = 0, left_flag = 0, in_flag = 0, out_flag = 0, stop_flag = 0;
+static int encoder_pitch_data = 0;
+static int encoder_yaw_data = 0;
+static int encoder_zoom_data = 0;
+int edit_data[10];	               //SEND_DATA用
+//pic-windows
+enum eCODE {
+	OFFSET, RESET,
+	START, STOP,
+	R_UP, R_DOWN,
+	L_UP, L_DOWN,
+	SPEED_UP, SPEED_DOWN,
+	SEND_DATA, DATA_CHECK,
+	NEUTRAL,
+	REMOVE_SCOPE, UP, DOWN, LEFT, RIGHT, ZOOM_IN, ZOOM_OUT, BREAK,
+	LEFTIN, LEFTOUT, RIGHTIN, RIGHTOUT, UPIN, UPOUT, DOWNIN, DOWNOUT
+};
+
+//--------------------------------------------
+// Name:DlgWndProc()
+// Desc:ダイアログ用ウィンドウプロシージャ
+//--------------------------------------------
+BOOL CALLBACK DlgWndProc(HWND hWnd, UINT iMsg, WPARAM wParam, LPARAM lParam)
+{
+	TCHAR szstr[256] = _T("");
+	DWORD dwThread;
+	static int roll_data, yaw_data, pitch_data;
+	static short int s_flag = 0;// ss_flag = 0;
+	static bool file_write = 0;		//ファイルに記録するかどうか
+	static int file_flag = 0, write_flag = 0;
+	SYSTEMTIME systime;//時間記録用
+
+	char FileName[127] = { "FILE_AD" };//ファイルの名前用の文字列
+
+	//変数の宣言
+	//シリアル通信用
+
+	int check_data[2] = { 0,0 };			   //通信確認用
+
+	//AD7150設定取得用
+	unsigned static int ch2_data = 0, ch2_critical = 10000;	//ch2_data:筋収縮センサの値 ch2_critical:閾値
+	unsigned static int ch1_data = 0, ch1_critical = 10000;	//ch1_data:加速度センサの値 ch1_critical:閾値
+	static int VR = 0;//可変抵抗用
+
+	static int speed_data = 0;//速度
+	static int senser_threshold_per = 0;//閾値
+
+	//グラフ表示関係
+	static int g_scale = 1;  //data*g_scalse/12 表示調整
+	//通信・ファイル出力操作用
+	static int flags = 1;
+
+	//カウンタ
+	unsigned static int time_count = 0, Off_count = 0;
+
+	//位置データ
+	int i;
+
+	static int neutral_count = 0;
+
+	switch (iMsg)
+	{
+	case WM_INITDIALOG:
+		//ダイアログボックスが生成されたとき
+		Button_SetCheck(GetDlgItem(hWnd, IDC_BUTTON1), BST_CHECKED);
+		cserial = new CSerial; 							// Cserialクラスを取得
+		cserial->MakeBuffer(3, 10); 					// 送信用データを1byte、受信用データを4byte用意する。
+		if (cserial->GetComNum(NULL) == 0) {
+			MessageBox(hWnd, "接続を確認できません", "error", MB_OK);
+			PostQuitMessage(0);
+			//CSerialクラスの終了処理
+			delete cserial;
+			return 1;
+		}
+		//cserial->SetFindSerialPortName(0);
+		cserial->SetSerialPortName("COM7");
+		cserial->OpenSerialPort(); 					// シリアルポートをオープンする。
+		cserial->SetSerialPort(115200, 1024, 1024);	// ボーレイトの設定
+		cserial->SerialPortBufferClear(); 				// シリアルポートの送受信FIFOメモリをクリアする。
+		return TRUE;
+	case WM_COMMAND:
+
+		SendMessage(GetDlgItem(hWnd, IDC_EDIT1), WM_SETFONT, (WPARAM)CreateFont(50, 0, 0, 0, FW_REGULAR, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, PROOF_QUALITY, DEFAULT_PITCH, "ＭＳ Ｐゴシック"), MAKELPARAM(TRUE, 0));
+		switch (LOWORD(wParam))
+		{
+		case IDC_BUTTON1:
+			if (flags) {
+				//SetWindowText(GetDlgItem(hWnd, IDC_EDIT1), _T("画面表示"));
+				SetTimer(hWnd, 1, 1, NULL);//通信系
+				//SetTimer(hWnd, 2, 1, NULL);//表示系
+				if (threadHandle != NULL) break;
+				//スレッド起動
+				threadHandle = (HANDLE)_beginthreadex(NULL, 0, camera, NULL, 0, (unsigned int*)&dwThread);
+				flags = 0;
+
+			}
+			else {
+				KillTimer(hWnd, 1);
+				KillTimer(hWnd, 2);
+				flags = 1;
+			}
+			break;
+		case IDC_BUTTON2:
+			SetWindowText(GetDlgItem(hWnd, IDC_EDIT1), _T("確認"));
+			STATUS = 0;
+			send_count = 2;
+			break;
+
+		case IDC_BUTTON8:
+			STATUS = 1;
+			send_count = 1;
+			break;
+		}
+		return TRUE;
+	case WM_TIMER:
+		switch (LOWORD(wParam)) {
+		case 1:
+
+			/*========================receive data========================================================-*/
+			cserial->m_senddata[0] = (unsigned char)SEND_DATA;				//確認用データを代入する。
+			cserial->SerialPortBufferClear();
+			cserial->SendSerialData(1);										//確認用データを送信する。
+			cserial->ReceiveSerialData(10);//0815
+			//とりあえず28byte分のデータを受け取る
+			for (int i = 0; i < 10; i++) {
+				edit_data[i] = cserial->m_receivedata[i];
+			}
+			if ((edit_data[0] == DATA_CHECK) && (edit_data[9] == DATA_CHECK)) {//0と27番目のデータは確認用
+
+				edit_data[2] <<= 8;			//19,20byte目はピッチエンコーダの値
+				edit_data[1] |= edit_data[2];
+				encoder_pitch_data = edit_data[1];
+
+				edit_data[4] <<= 8;			//21,22byte目はヨーエンコーダの値
+				edit_data[3] |= edit_data[4];
+				encoder_yaw_data = edit_data[3];
+
+				edit_data[6] <<= 8;			//23,24byte目はズームエンコーダの値
+				edit_data[5] |= edit_data[6];
+				encoder_zoom_data = edit_data[5];
+
+				edit_data[8] <<= 8;            //25,26byte目は運用状態
+				edit_data[7] |= edit_data[8];
+				operation_status = edit_data[7];
+
+				cserial->SerialPortBufferClear();
+			}
+
+
+			/*===================================seda data==================================================*/
+			switch (send_count) {
+			case 1:	//マスターにSTRATという値を送る
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT1), _T("START"));
+				cserial->m_senddata[0] = (unsigned char)START;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				operation_status = 0;
+				send_count = 0;
+				break;
+
+			case 2://マスターにSTOPという値を送る
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT1), _T("STOP"));
+				cserial->m_senddata[0] = (unsigned char)STOP;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 19://マスターにNEUTRALという値を送る
+				cserial->m_senddata[0] = (unsigned char)NEUTRAL;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 20://マスターにREMOVE_SCOPEという値を送る
+				cserial->m_senddata[0] = (unsigned char)REMOVE_SCOPE;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 3:
+
+				cserial->m_senddata[0] = (unsigned char)LEFT;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 4:
+				cserial->m_senddata[0] = (unsigned char)RIGHT;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 5:
+				cserial->m_senddata[0] = (unsigned char)UP;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 6:
+				cserial->m_senddata[0] = (unsigned char)DOWN;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 7:
+				cserial->m_senddata[0] = (unsigned char)ZOOM_IN;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 8:
+				cserial->m_senddata[0] = (unsigned char)ZOOM_OUT;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 9:
+				cserial->m_senddata[0] = (unsigned char)BREAK;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 10:
+				cserial->m_senddata[0] = (unsigned char)LEFTIN;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 11:
+				cserial->m_senddata[0] = (unsigned char)LEFTOUT;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 12:
+				cserial->m_senddata[0] = (unsigned char)RIGHTIN;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 13:
+				cserial->m_senddata[0] = (unsigned char)RIGHTOUT;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 14:
+				cserial->m_senddata[0] = (unsigned char)UPIN;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 15:
+				cserial->m_senddata[0] = (unsigned char)UPOUT;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 16:
+				cserial->m_senddata[0] = (unsigned char)DOWNIN;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			case 17:
+				cserial->m_senddata[0] = (unsigned char)DOWNOUT;
+				cserial->SerialPortBufferClear();
+				cserial->SendSerialData(1);
+				send_count = 0;
+				break;
+
+			}
+			return 1;
+
+		case 2:
+			SendMessage(GetDlgItem(hWnd, IDC_EDIT2), WM_SETFONT, (WPARAM)CreateFont(50, 0, 0, 0, FW_REGULAR, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, PROOF_QUALITY, DEFAULT_PITCH, "ＭＳ Ｐゴシック"), MAKELPARAM(TRUE, 0));
+			SetDlgItemInt(hWnd, IDC_encoder_pitch, encoder_pitch_data, 1);//pitch location
+			SetDlgItemInt(hWnd, IDC_encoder_yaw, encoder_yaw_data, 1);//yow location
+			SetDlgItemInt(hWnd, IDC_encoder_zoom, encoder_zoom_data, 1);//zoom location
+
+			//状態表示　初期値は3
+			switch (operation_status) {
+			case 0:
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT2), _T("BREAK"));
+				break;
+			case 1:
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT2), _T("PITCH"));
+				break;
+			case 2:
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT2), _T("YAW"));
+				break;
+			case 3:
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT2), _T("ZOOM IN"));
+				break;
+			case 4:
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT2), _T("ZOOM OUT"));
+				break;
+			case 5:
+				SetWindowText(GetDlgItem(hWnd, IDC_EDIT2), _T("now config"));
+				break;
+			}
+			return 1;
+		}
+		break;
+		// ×ボタンをクリックしたときの処理
+	case WM_CLOSE:
+		//ダイアログを破棄
+		DestroyWindow(hWnd);
+		//fclose(fp0);//ファイルを閉じる
+		return 1;
+
+		//終了(ウィンドウを閉じた後の)処理
+	case WM_DESTROY:
+		PostQuitMessage(0);
+		//CSerialクラスの終了処理
+		delete cserial;
+		return 1;
+
+	default:
+		return FALSE;
+	}
+}
+
+using namespace cv;
+using namespace std;
+
+int xb = 0, yb = 0;
+int ct = 0;
+int st = 0;
+double theta = 0;
+double pre_theta = 0;
+Point square_left = Point(90, 80);
+Point square_right = Point(150, 80);
+Point square = Point(0, 0);
+int Height = 0;
+int Width = 0;
+int switcher = 0;
+
+#ifdef _DEBUG
+#pragma comment(lib, "opencv_world452d.lib")
+#else
+#pragma comment(lib, "opencv_world452.lib")
+#endif
+
+Point center(Point max, Point min, Point MAX, Point MIN) {
+	Point v;
+	int k = 0;
+	double s1 = 0, s2 = 0;
+	int P1X = MIN.x;
+	int P1Y = MIN.y;
+	int P2Y = min.y;
+	int P2X = min.x;
+	int P3X = MAX.x;
+	int P3Y = MAX.y;
+	int P4Y = max.y;
+	int P4X = max.x;
+
+	s1 = ((P4X - P2X) * (P1Y - P2Y) - (P4Y - P2Y) * (P1X - P2X)) / 2;
+	s2 = ((P4X - P2X) * (P2Y - P3Y) - (P4Y - P2Y) * (P2X - P3X)) / 2;
+
+	v = Point(0, 0);
+	v.x = P1X + ((double)P3X - (double)P1X) * s1 / (s1 + s2);
+	v.y = P1Y + ((double)P3Y - (double)P1Y) * s1 / (s1 + s2);
+
+	return v;
+}
+
+void templateMatch(Mat src, Mat tmp, Mat frame) {
+
+	int sumx = 0, sumy = 0;
+	const int __TARGET_NUM__ = 30;
+	Mat output, dst;
+	//dst = src.clone();
+	dst = frame.clone();
+	//テンプレートマッチング
+	matchTemplate(src, tmp, output, TM_CCOEFF);
+	//0~1の値に標準化
+	normalize(output, output, 0, 1, NORM_MINMAX, -1, Mat());
+	//2次元から1次元へ変換
+	Mat one_row = output.reshape(1, 1);
+
+	vector<float> one_row_vec;
+	vector<float> one_row_index;
+
+	//cv::Mat -> std::vector に変換
+	one_row_vec.assign(one_row.begin<float>(), one_row.end<float>());
+	vector<int> index(one_row_vec.size());
+
+	//ソートインデックス配列用に整数列を作成する(0,1,2,3,4,5......)
+	iota(index.begin(), index.end(), 0);
+
+	//ソートをかける
+	sort(index.begin(), index.end(), [&](int a, int b) {return one_row_vec[a] > one_row_vec[b]; });
+
+	for (int i = 0; i < __TARGET_NUM__; i++) {
+		//std::cout << index[i] << ":" << one_row_vec[index[i]] << std::endl;
+		if (one_row_vec[index[i]] > 0.999) {
+			// 1次元から2次元に変換 
+			int x = index[i] % output.cols;
+			int y = index[i] / output.cols;
+
+			Rect roi_rect = Rect(x, y, tmp.cols, tmp.rows);
+			rectangle(dst, roi_rect, Scalar(0, 255, 255), 3);
+			xb = x;
+			yb = y;
+		}
+	}
+}
+
+Mat Bit_Wise2(Mat img1, Mat img2) {
+	Mat img1_gry, img2_gry, img_gry;
+	cvtColor(img1, img1_gry, COLOR_BGR2GRAY);
+	cvtColor(img2, img2_gry, COLOR_BGR2GRAY);
+
+	absdiff(img1_gry, img2_gry, img_gry);
+
+
+	return img_gry;
+}
+
+int MatArea(Mat canny) {
+	vector<int> Area(1000);
+	dilate(canny, canny, Mat(), Point(-1, -1), 3);
+
+	vector<vector<Point> > contours;
+	findContours(canny, contours, RETR_TREE, CHAIN_APPROX_SIMPLE);
+
+	Mat drawing = Mat::zeros(canny.size(), CV_8UC3);
+	RNG rng(12345);
+
+	for (size_t i = 0; i < contours.size(); i++) {
+		Scalar color = cv::Scalar(rng.uniform(0, 256), rng.uniform(0, 256), rng.uniform(0, 256));
+		drawContours(drawing, contours, (int)i, color);
+		Area.at(i) = contourArea(contours[i]);
+	}
+
+	sort(Area.begin(), Area.end(), greater<int>());
+
+	return Area.at(0);
+}
+
+int Match(Mat src, Mat tmp) {
+
+	int sumx = 0, sumy = 0;
+	int match = 0;
+	const int __TARGET_NUM__ = 30;
+	Mat output;
+	//テンプレートマッチング
+	matchTemplate(src, tmp, output, TM_CCOEFF);
+	//0~1の値に標準化
+	normalize(output, output, 0, 1, NORM_MINMAX, -1, Mat());
+	//2次元から1次元へ変換
+	Mat one_row = output.reshape(1, 1);
+
+	vector<float> one_row_vec;
+	vector<float> one_row_index;
+
+	//cv::Mat -> std::vector に変換
+	one_row_vec.assign(one_row.begin<float>(), one_row.end<float>());
+	vector<int> index(one_row_vec.size());
+
+	//ソートインデックス配列用に整数列を作成する(0,1,2,3,4,5......)
+	iota(index.begin(), index.end(), 0);
+
+	//ソートをかける
+	sort(index.begin(), index.end(), [&](int a, int b) {return one_row_vec[a] > one_row_vec[b]; });
+
+	for (int i = 0; i < __TARGET_NUM__; i++) {
+		//std::cout << index[i] << ":" << one_row_vec[index[i]] << std::endl;
+		if (one_row_vec[index[i]] > 0.9) {
+			match = 1;
+		}
+		else {
+			match = 0;
+		}
+	}
+	return match;
+}
+
+pair<Point, double> three_seg(vector<KeyPoint> keypoint) {
+	Point v = Point(0, 0);
+	
+	vector<int> m1(5);
+	vector<int> m2(5);
+	vector<int> m3(5);
+	int a = 0;
+	double sumx = 0, sumy = 0;
+	Point G = Point(0, 0);
+	for (int i = 0; i < keypoint.size(); i++) {
+		sumx += (double)keypoint.at(i).pt.x;
+		sumy += (double)keypoint.at(i).pt.y;
+		a++;
+	}
+	G.x = sumx / (double)a;
+	G.y = sumy / (double)a;
+	vector<pair<double, double>> data(a);//radian,distance
+	for (int j = 0; j < a; j++) {
+		data.at(j).second = sqrt(pow(G.x - (double)keypoint.at(j).pt.x, 2) + pow(G.y - (double)keypoint.at(j).pt.y, 2));
+		data.at(j).first = atan2(G.y - (double)keypoint.at(j).pt.y, G.x - (double)keypoint.at(j).pt.x);
+	}
+
+	sort(data.begin(), data.end());
+	vector<pair<double, double>> store(12);//distance,radian
+	vector<double> dstore(12);//distance,radian
+	Point edge1 = Point(0, 0);
+	Point edge2 = Point(0, 0);
+	Point edge3 = Point(0, 0);
+	Point edge_tmp = Point(0, 0);
+	double set_radian = -(double)1770 / (double)678;//2.5
+	double base_radian = -(double)354 / (double)113;
+	int s = 0;
+	//ラジアン6等分&最大値取得
+	for (int k = 0; k < a; k++) {
+		if (data.at(k).first > set_radian) {
+			set_radian += (double)354 / (double)678;//0.5
+			base_radian += (double)354 / (double)678;
+			s++;
+			if (s > 11) {
+				break;
+			}
+		}
+
+		if (data.at(k).first < set_radian && data.at(k).first > base_radian) {
+			dstore.at(s) += data.at(k).second;
+			if (store.at(s).first < data.at(k).second) {
+				store.at(s).first = data.at(k).second;
+				store.at(s).second = data.at(k).first;
+			}
+		}
+	}
+
+	vector<int> xx(4);
+	int marcury = 1;
+	xx.at(0) = 0;
+	for (int w = 1; w < 11; w++) {
+		if (dstore.at(w - 1) < dstore.at(w)) {
+			if (dstore.at(w) > dstore.at(w + 1) && dstore.at(w) > 500) {
+				xx.at(marcury) = w;
+				marcury += 1;
+			}
+		}
+		if (marcury == 4) {
+			xx.at(0) = xx.at(1);
+			xx.at(1) = xx.at(2);
+			xx.at(2) = xx.at(3);
+			break;
+		}
+	}
+	if (marcury < 3) {
+		exit;
+	}
+	
+	vector<double> distance(a);
+	int xx_tmp = 0;
+	for (int q = 0; q < a; q++) {
+		Scalar color(rand() & 255, rand() & 255, rand() & 255);
+		distance.at(q) = sqrt(pow(G.x - (double)keypoint.at(q).pt.x, 2) + pow(G.y - (double)keypoint.at(q).pt.y, 2));
+		if (distance.at(q) == store.at(xx.at(0)).first) {
+			edge1 = keypoint.at(q).pt;
+		}
+		else if (distance.at(q) == store.at(xx.at(1)).first) {
+			edge2 = keypoint.at(q).pt;
+		}
+		else if (distance.at(q) == store.at(xx.at(2)).first) {
+			edge3 = keypoint.at(q).pt;
+		}
+	}
+
+	if (switcher == 0) {
+		if (edge1.x > edge2.x) {
+			edge_tmp = edge2;
+			edge2 = edge1;
+			edge1 = edge_tmp;
+			xx_tmp = xx.at(1);
+			xx.at(1) = xx.at(0);
+			xx.at(0) = xx_tmp;
+		}
+		if (edge1.x > edge3.x) {
+			edge_tmp = edge3;
+			edge3 = edge1;
+			edge1 = edge_tmp;
+			xx_tmp = xx.at(2);
+			xx.at(2) = xx.at(0);
+			xx.at(0) = xx_tmp;
+		}
+	}
+	else {
+		if (edge1.x < edge2.x) {
+			edge_tmp = edge2;
+			edge2 = edge1;
+			edge1 = edge_tmp;
+			xx_tmp = xx.at(1);
+			xx.at(1) = xx.at(0);
+			xx.at(0) = xx_tmp;
+		}
+		if (edge1.x < edge3.x) {
+			edge_tmp = edge3;
+			edge3 = edge1;
+			edge1 = edge_tmp;
+			xx_tmp = xx.at(2);
+			xx.at(2) = xx.at(0);
+			xx.at(0) = xx_tmp;
+		}
+	}
+	Point A = Point(0, 0);
+	Point B = Point(0, 0);
+	double cos = 0;
+
+	if (edge1.x > 0 && edge1.y > 0) {
+		if (switcher == 0) {
+			square = square_left;
+			A.x = edge2.x - square.x;
+			A.y = edge2.y - square.y;
+			B.x = edge3.x - square.x;
+			B.y = edge3.y - square.y;
+		}
+		else {
+			square = square_right;
+			A.x = edge2.x - square.x;
+			A.y = edge2.y - square.y;
+			B.x = edge3.x - square.x;
+			B.y = edge3.y - square.y;
+		}
+		
+
+		cos = ((double)A.x * (double)B.x + (double)A.y * (double)B.y) / (sqrt(pow(A.x, 2) + pow(A.y, 2)) * sqrt(pow(B.x, 2) + pow(B.y, 2)));
+		theta = acos(cos) * (double)180 / PI;
+		pre_theta;
+	}
+	else {
+		theta = pre_theta;
+	}
+	return { v,theta };
+}
+
+Mat mask1(Mat img) {
+	Mat mask, mask2, bgf1;
+	Mat kernel = getStructuringElement(MORPH_RECT, Size(15, 15));
+	if (switcher == 0) {
+		inRange(img, Scalar(0, 0, 140), Scalar(0, 255, 255), mask);
+	}
+	else {
+		inRange(img, Scalar(0, 180, 0), Scalar(0, 255, 255), mask);
+	}
+	//inRange(img, Scalar(slider_value, slider_value3, slider_value5),
+		//Scalar(slider_value2, slider_value4, slider_value6), mask);
+	morphologyEx(mask, mask2, MORPH_OPEN, kernel);
+	for (int i = 0; i < 3; i++) {
+		morphologyEx(mask2, mask2, MORPH_OPEN, kernel);
+		medianBlur(mask2, mask2, 5);
+	}
+	threshold(mask2, bgf1, 120, 255, THRESH_BINARY);
+	return bgf1;
+}
+
+Mat mask2(Mat img) {
+	Mat mask3, mask4, bgf2;
+	Mat kernel = getStructuringElement(MORPH_RECT, Size(15, 15));
+	if (switcher == 0) {
+		inRange(img, Scalar(0, 80, 0), Scalar(70, 255, 40), mask3);
+	}
+	else {
+		inRange(img, Scalar(0, 0, 100), Scalar(0, 255, 255), mask3);
+	}
+	morphologyEx(mask3, mask4, MORPH_OPEN, kernel);
+	for (int i = 0; i < 3; i++) {
+		morphologyEx(mask4, mask4, MORPH_OPEN, kernel);
+		medianBlur(mask4, mask4, 5);
+	}
+	threshold(mask4, bgf2, 120, 255, THRESH_BINARY);
+	return bgf2;
+}
+
+Mat mask3(Mat img) {
+	Mat mask, mask2, bgf1;
+	Mat kernel = getStructuringElement(MORPH_RECT, Size(13, 13));
+	if (switcher == 0) {
+		inRange(img, Scalar(100, 0, 100), Scalar(255, 0, 255), mask);
+	}
+	else {
+		inRange(img, Scalar(0, 0, 70), Scalar(255, 0, 255), mask);
+	}
+	morphologyEx(mask, mask2, MORPH_OPEN, kernel);
+	for (int i = 0; i < 3; i++) {
+		morphologyEx(mask2, mask2, MORPH_OPEN, kernel);
+		medianBlur(mask2, mask2, 5);
+	}
+	threshold(mask2, bgf1, 120, 255, THRESH_BINARY);
+	return bgf1;
+}
+
+Mat mask4(Mat img) {
+	Mat mask, mask2, bgf1;
+	int White = 0;
+	Mat kernel = getStructuringElement(MORPH_RECT, Size(15, 15));
+	if (switcher == 0) {
+		inRange(img, Scalar(120, 0, 120), Scalar(255, 110, 255), mask);
+	}
+	else {
+		inRange(img, Scalar(0, 120, 0), Scalar(255, 255, 100), mask);
+	}
+	morphologyEx(mask, mask2, MORPH_OPEN, kernel);
+	for (int i = 0; i < 3; i++) {
+		morphologyEx(mask2, mask2, MORPH_OPEN, kernel);
+		medianBlur(mask2, mask2, 5);
+	}
+	threshold(mask2, bgf1, 120, 255, THRESH_BINARY);
+	return bgf1;
+}
+
+vector<vector<Point>> contours(Mat img) {
+	vector< vector<Point> > contours;
+	vector< vector<Point> > contours_subset;
+	vector<Vec4i> hierarchy;
+	int c = 0;
+	findContours(img, contours, hierarchy, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+	for (auto contour = contours.begin(); contour != contours.end(); contour++) {
+		for (int i = 0; i < contours.size(); i++) {
+			double area1 = 0;
+			area1 = contourArea(contours.at(i));
+			if (area1 > 5 && area1 < 20) {
+				contours_subset.push_back(contours.at(i));
+			}
+		}
+	}
+	return contours_subset;
+}
+
+Point minPoint(vector<cv::Point> contours) {
+	double minx = contours.at(0).x;
+	double miny = contours.at(0).y;
+	for (int i = 1; i < contours.size(); i++) {
+		if (minx > contours.at(i).x) {
+			minx = contours.at(i).x;
+		}
+		if (miny > contours.at(i).y) {
+			miny = contours.at(i).y;
+		}
+	}
+	return cv::Point(minx, miny);
+}
+
+Point maxPoint(vector<cv::Point> contours) {
+	double maxx = contours.at(0).x;
+	double maxy = contours.at(0).y;
+	for (int i = 1; i < contours.size(); i++) {
+		if (maxx < contours.at(i).x) {
+			maxx = contours.at(i).x;
+		}
+		if (maxy < contours.at(i).y) {
+			maxy = contours.at(i).y;
+		}
+	}
+	return cv::Point(maxx, maxy);
+}
+
+Point Center(Point max, Point min, Point MAX, Point MIN) {
+	Point v;
+	int k = 0;
+	double s1 = 0, s2 = 0;
+	int P1X = MIN.x;
+	int P1Y = MIN.y;
+	int P2Y = min.y;
+	int P2X = min.x;
+	int P3X = MAX.x;
+	int P3Y = MAX.y;
+	int P4Y = max.y;
+	int P4X = max.x;
+
+	s1 = ((P4X - P2X) * (P1Y - P2Y) - (P4Y - P2Y) * (P1X - P2X)) / 2;
+	s2 = ((P4X - P2X) * (P2Y - P3Y) - (P4Y - P2Y) * (P2X - P3X)) / 2;
+
+	v = Point(0, 0);
+	v.x = P1X + ((double)P3X - (double)P1X) * s1 / (s1 + s2);
+	v.y = P1Y + ((double)P3Y - (double)P1Y) * s1 / (s1 + s2);
+
+	return v;
+}
+
+Point Optical(Mat source, Mat HIS_source) {
+	Mat source2(Height, Width, CV_8UC1);
+	Mat HIS_source2(Height, Width, CV_8UC1);
+	Mat copy;
+	Mat disp = source.clone();
+	cvtColor(source, source, COLOR_BGR2GRAY);
+	medianBlur(source, source, 5);
+	medianBlur(HIS_source, HIS_source, 5);
+	bilateralFilter(source, source2, 17, 40, 5);
+	bilateralFilter(HIS_source, HIS_source2, 17, 40, 5);
+
+	vector<cv::Point2f> prev_pts;
+	vector<cv::Point2f> next_pts;
+	Size flowSize(100, 100); //ベクトルの数
+	Point2f center = cv::Point(source.cols / 2., source.rows / 2.);
+	for (int i = 0; i < flowSize.width; ++i) {
+		for (int j = 0; j < flowSize.width; ++j) {
+			Point2f p(i * float(source.cols) / (flowSize.width - 1),
+				j * float(source.rows) / (flowSize.height - 1));
+			prev_pts.push_back((p - center) * 0.95f + center);
+		}
+	}
+
+	Mat flow;
+	vector<float> error;
+	copy = source2.clone();
+	calcOpticalFlowFarneback(HIS_source2, source2, flow, 0.8, 10, 15, 3, 5, 1.1, 0);
+	// オプティカルフローの表示
+	cvtColor(disp, disp, COLOR_BGR2HSV);
+	vector<Point2f>::const_iterator p = prev_pts.begin();
+	for (; p != prev_pts.end(); ++p) {
+		const Point2f& fxy = flow.at<Point2f>(p->y, p->x);
+		double angle = atan2(fxy.y, fxy.x);
+		double length = pow(pow(fxy.x, 2) + pow(fxy.y, 2), 0.5);
+		if (length > 1) {
+			circle(disp, *p, 5, Scalar((angle + PI) / 2 / PI * 180, 255, 255), -1, 4);
+
+		}
+	}
+	/*
+	// 色相と方向の対応関係を表示
+	for (int a = 0; a < 100; a++) {
+		double angle = (double)(a - 50) / 100 * 2 * PI;
+		circle(disp, Point(60 + 50 * cos(angle), 60 + 50 * sin(angle)), 5, Scalar((angle + PI) / 2 / PI * 180, 255, 255), -1, 4);
+	}
+	*/
+	cvtColor(disp, disp, COLOR_HSV2BGR);
+	
+	Mat Mask1 = mask1(disp);
+	Mat Mask2 = mask2(disp);
+	Mat Mask3 = mask3(disp);
+	Mat Mask4 = mask4(disp);
+	vector< vector<Point> > contours_subset1;
+	vector< vector<Point> > contours_subset2;
+	vector< vector<Point> > contours_subset3;
+	vector< vector<Point> > contours_subset4;
+
+	Canny(copy, copy, 10, 15, 3, true);
+	bitwise_and(copy, Mask1, Mask1);
+	bitwise_and(copy, Mask2, Mask2);
+	bitwise_and(copy, Mask3, Mask3);
+	bitwise_and(copy, Mask4, Mask4);
+
+	contours_subset1 = contours(Mask1);
+	contours_subset2 = contours(Mask2);
+	contours_subset3 = contours(Mask3);
+	contours_subset4 = contours(Mask4);
+
+	Point minP1 = Point(0, 0);
+	Point maxP1 = Point(0, 0);
+	Point minP2 = Point(0, 0);
+	Point maxP2 = Point(0, 0);
+	Point minP3 = Point(0, 0);
+	Point maxP3 = Point(0, 0);
+	Point minP4 = Point(0, 0);
+	Point maxP4 = Point(0, 0);
+	Point v = Point(0, 0);
+	for (int i = 0; i < contours_subset1.size(); i++) {
+		minP1 = minPoint(contours_subset1.at(i)) + Point(150, 50);
+		maxP1 = maxPoint(contours_subset1.at(i)) + Point(150, 50);
+	}
+
+	for (int i = 0; i < contours_subset2.size(); i++) {
+		minP2 = minPoint(contours_subset2.at(i)) + Point(150, 50);
+		maxP2 = maxPoint(contours_subset2.at(i)) + Point(150, 50);
+	}
+
+	for (int i = 0; i < contours_subset3.size(); i++) {
+		minP3 = minPoint(contours_subset3.at(i)) + Point(150, 50);
+		maxP3 = maxPoint(contours_subset3.at(i)) + Point(150, 50);
+	}
+
+	for (int i = 0; i < contours_subset4.size(); i++) {
+		minP4 = minPoint(contours_subset4.at(i)) + Point(150, 50);
+		maxP4 = maxPoint(contours_subset4.at(i)) + Point(150, 50);
+	}
+
+	v = Center(maxP1, minP2, maxP3, minP4);
+	return v;
+}
+
+//画像処理関数
+unsigned int __stdcall camera(PVOID pv)
+{
+	VideoCapture capture(0);
+
+	int sikimi = 0, renbu = 0, katorea = 0, gyima = 0;
+	int step = 0;
+	int step_point = 0;
+	int point = 0;
+	vector<Point> v(95);
+	int diff_Flag = 0;
+	int checkwhite = 0;
+	int checkwhite2 = 0;
+	int checkpoint = 0;
+	int checkpoint2 = 0;
+	int onemore_check = 0, onemore_flag = 0;
+	int timeout = 0;
+	Mat decadeimg;
+
+	Rect part(0, 0, 250, 150);
+	Rect impart2(1158, 0, 250, 150);
+	Rect part2(454, 0, 250, 150);
+	const char* name1 = "Comfigure";
+	const char* name2 = "Detection";
+	const char* name3 = "Output";
+	vector<pair<int, int>>countdx(1000);
+
+	int imageCount = 1; // 入力画像の枚数
+	int channelsToUse[] = { 0 }; // 0番目のチャネルを使う
+	int dimention = 1; // ヒストグラムの次元数
+	int binCount = 256; // ヒストグラムのビンの数
+	int binCounts[] = { binCount };
+	float range[] = { 0, 256 }; // データの範囲は0～255
+	const float* histRange[] = { range };
+
+
+	Mat preimg, impreimg;
+	for (;;) {
+		capture >> preimg;
+		moveWindow("pre", 1900, 0);
+		resize(preimg, impreimg, Size(), 2, 2);
+		imshow("pre", impreimg);
+		waitKey(1);
+		if (waitKey(33) == 27) {
+			destroyAllWindows();
+			break;
+		}
+	}
+
+
+	for (;;) {
+		startWindowThread();
+
+		for (;;) {
+			Mat frame, rame2, rame2_gry, difframe, difframe_canny;
+			Mat rame21, rame21_gry, difframe2, difframe_canny2;
+			Mat useframe, useframe_gry, useframe_canny, Use;
+			Mat useframe2, useframe_gry2, useframe_canny2, Use2;
+			Mat imframe, noframe, tmp;
+			Rect vision = Rect(250, 150, 195, 175);
+			Rect target = Rect(220, 130, 255, 215);//for Optical
+			Rect rockon = Rect(220, 140, 255, 195);//for AKAZE
+			for (;;) {
+				waitKey(2);
+				if (state == 2) {
+					DestroyWindow(hWnd);
+					break;
+				}
+				if (STATUS == 0) {
+
+					for (;;) {
+						waitKey(2);
+						capture >> frame;
+						waitKey(2);
+						if (frame.empty()) {
+							break;
+						}
+						moveWindow(name1, 1910, 0);
+						useframe = frame(part).clone();
+
+						resize(frame, imframe, Size(), 2, 2);
+						useframe2 = frame(part2).clone();
+						rectangle(imframe, part, Scalar(255, 55, 255), 3);
+						//rectangle(imframe, impart2, Scalar(55, 255, 255), 3);
+						imshow(name1, imframe);
+
+						cvtColor(useframe, useframe_gry, COLOR_BGR2GRAY);
+						cvtColor(useframe2, useframe_gry2, COLOR_BGR2GRAY);
+						waitKey(1);
+						capture >> rame2;
+						Use2 = rame2.clone();
+						rame2 = rame2(part).clone();
+						rame21 = Use2(part2).clone();
+						cvtColor(rame2, rame2_gry, COLOR_BGR2GRAY);
+						cvtColor(rame21, rame21_gry, COLOR_BGR2GRAY);
+						absdiff(useframe_gry, rame2_gry, difframe);
+						absdiff(useframe_gry2, rame21_gry, difframe2);
+						medianBlur(difframe, difframe, 3);
+						medianBlur(difframe2, difframe2, 3);
+						Canny(difframe, difframe_canny, 100, 15, 3, true);
+						Canny(difframe2, difframe_canny2, 100, 15, 3, true);
+						Use = difframe_canny.clone();
+						checkwhite = MatArea(difframe_canny);
+						checkwhite2 = MatArea(difframe_canny2);
+						waitKey(2);
+						if (checkwhite > checkwhite2 && checkwhite > 7000) {
+							checkpoint++;
+						}
+						else if (checkwhite2 > checkwhite && checkwhite2 > 7000) {
+							//checkpoint2++;
+						}
+
+						if (checkpoint > 10) {
+							STATUS = 1;
+							checkpoint = 0;
+							checkpoint2 = 0;
+							switcher = 0;
+						}
+						else if (checkpoint2 > 3) {
+							STATUS = 1;
+							checkpoint2 = 0;
+							checkpoint = 0;
+							switcher = 1;
+						}
+
+						if (STATUS == 1 || state == 2) {
+							waitKey(1);
+							moveWindow(name1, 0, 0);
+							resize(frame, noframe, Size(), 0.3, 0.3);
+							imshow(name1, noframe);
+							break;
+						}
+					}
+				}
+				if (STATUS == 1) {
+					break;
+				}
+			}
+
+			Mat frame1, frame2, frame3, frame4, frame5;
+			waitKey(2);
+			capture >> frame1;
+			Mat AKimg1, AKimg2, AKimg3, AKimg99, AKdiff, AKedge;
+			Mat silhouette;
+			AKimg1 = frame1(rockon).clone();
+			Rect selection(150, 50, 400, 350);
+			int pHeight = frame1.rows;
+			int pWidth = frame1.cols;
+
+			Point G = Point(0, 0);
+			int stuck = 3, nowstate = 0, bstate = 0, stateflag = 0;
+			int venus = 0;
+			Mat imframe3, noframe3;
+			Mat psource;
+			Mat pHIS_source(pHeight, pWidth, CV_8UC1);
+			double pLen = 0, pinside_Flag = 0;
+			pHIS_source = pHIS_source(rockon).clone();
+			int status_flag = 0;
+			double length = 0, store_length = 0;
+			double sum_length = 0, avr_length = 0, compare_length = 0;
+			Mat descriptor1, descriptor2;
+			vector<KeyPoint> keypoint, keypoint2;
+			clock_t start, end;
+			if (onemore_flag == 0) {
+				//動体検出部
+				for (;;) {
+					capture >> frame2;
+					frame3 = frame2.clone();
+					tmp = frame2(vision).clone();
+					AKimg2 = frame2(rockon).clone();
+					AKimg3 = frame2(rockon).clone();
+					AKimg99 = frame2(rockon).clone();
+					//medianBlur(AKimg1, AKimg1, 5);
+					//medianBlur(AKimg2, AKimg2, 5);
+					AKdiff = Bit_Wise2(AKimg1, AKimg2);
+					medianBlur(AKdiff, AKdiff, 3);
+					Canny(AKdiff, AKedge, 50, 100, 3, true);
+
+					dilate(AKedge, AKedge, Mat(), Point(-1, -1), 5);
+					Mat AKimg4;
+					bitwise_and(AKimg3, AKimg3, AKimg4, AKedge);
+					//imshow("check", AKimg4);
+					auto algorithm = AKAZE::create();
+					Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create("BruteForce");
+					vector<DMatch> match, match12, match21;
+					algorithm->detect(AKimg4, keypoint);
+					Mat key2;
+
+					drawKeypoints(AKimg4, keypoint, key2, Scalar::all(-1));
+					//imshow("vfq", key2);
+					if (stateflag != 0) {
+						algorithm->compute(AKimg4, keypoint, descriptor2);
+						matcher->match(descriptor1, descriptor2, match12);
+						matcher->match(descriptor2, descriptor1, match21);
+
+						for (size_t i = 0; i < match12.size(); i++)
+						{
+							DMatch forward = match12[i];
+							DMatch backward = match21[forward.trainIdx];
+							if (backward.trainIdx == forward.queryIdx)
+							{
+								match.push_back(forward);
+							}
+						}
+						Mat dest;
+						drawMatches(silhouette, keypoint2, AKimg4, keypoint, match, dest, Scalar::all(-1));
+						//imshow("dst", dest);
+						double sum = 0;
+						for (size_t i = 0; i < match.size(); i++)
+						{
+							sum += match.at(i).distance;
+						}
+						length = sum / match.size();
+						sum_length += length;
+						char value_c[256]; //次の行で使う一時的な変数
+						sprintf_s(value_c, "%lf", length); //変数の値も含めた表示したい文字列をchar型変数に格納
+						//putText(frame3, value_c, Point(30, 40), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+					}
+					int b = keypoint.size();
+
+					if (b < 2) {
+						moveWindow(name2, 1900, 0);
+						resize(frame3, imframe3, Size(), 2, 2);
+						imshow(name2, imframe3);
+						continue;
+					}
+
+					/***Optical***/
+					capture >> psource;
+					psource = psource(rockon).clone();
+					Point pv = Optical(psource, pHIS_source);
+					cvtColor(psource, psource, COLOR_RGB2GRAY);
+					pHIS_source = psource.clone();
+
+					if (pv.x > 0 && pv.y > 0) {
+						pLen = sqrt(pow(pv.x - square.x, 2) + pow(pv.y - square.y, 2));//状態検知用
+						if (pLen < 100) {
+							pinside_Flag = 1;
+						}
+					}
+					Point fulcrum = three_seg(keypoint).first;
+					double theta = three_seg(keypoint).second;
+					if (theta > 35) {
+						theta += 40;
+					}
+					else if (theta < 15) {
+						theta -= 20;
+					}
+
+					if (theta > 50) {
+						stuck++;
+					}
+					else {
+						stuck--;
+					}
+
+					if (stuck == 6) {
+						if (stateflag == 1) {
+							if (pinside_Flag == 1) {
+								nowstate = 1;
+							}
+							else {
+								nowstate = 2;
+							}
+						}
+						else {
+							nowstate = 1;
+						}
+					}
+					else if (stuck == 0) {
+						nowstate = 0;
+						/*
+						if (length > 500) {
+							nowstate = 0;
+						}
+						else {
+							nowstate = 2;
+						}
+						*/
+					}
+					else {
+						nowstate = bstate;
+					}
+
+					if (venus % 3 == 0) {
+						avr_length = sum_length / (double)3;
+						sum_length = 0;
+						stuck = 3;
+					}
+					bstate = nowstate;
+					compare_length = store_length - length;
+					AKimg1 = AKimg99.clone();
+
+					if (nowstate == 1 && stateflag == 0) {
+						silhouette = AKimg4.clone();
+						algorithm->detect(silhouette, keypoint2);
+						algorithm->compute(silhouette, keypoint2, descriptor1);
+						Mat key;
+						drawKeypoints(AKimg4, keypoint2, key, Scalar::all(-1));
+						imshow("adhd", silhouette);
+						imshow("hd", key);
+						sikimi = 1;
+						stateflag = 1;
+						status_flag = 1;
+
+					}
+
+					if (nowstate == 0 && sikimi == 1) {
+						sikimi = 0;
+						renbu = 1;
+						status_flag = 2;
+						store_length = avr_length;
+						start = clock();
+
+					}
+
+					if (nowstate == 1 && renbu == 1 && compare_length > 50) {
+						katorea = 1;
+						stateflag = 0;
+					}
+
+					if (katorea > 0) {
+						gyima = 1;
+					}
+
+					if (status_flag == 0) {
+						putText(frame3, "move center", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 0, 100), 2);
+					}
+					else if (status_flag == 1) {
+						putText(frame3, "close slowly", Point(300, 400), FONT_ITALIC, 1.2, Scalar(0, 200, 100), 2);
+					}
+					else {
+						putText(frame3, "open slowly", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+					}
+
+					if (onemore_check == 1) {
+						putText(frame3, "one more please", Point(300, 100), FONT_ITALIC, 1.2, Scalar(255, 0, 0), 2);
+					}
+					//rectangle(frame3, selection, Scalar(255, 55, 255), 1);
+
+					rectangle(frame3, rockon, Scalar(0, 255, 255), 3);
+					if (length > 500) {
+						//line(frame3, Point(100, 50), Point(100, 400), Scalar(0, 255, 0), 5, 8);
+					}
+					else if (length > 200) {
+						//line(frame3, Point(500, 50), Point(500, 400), Scalar(0, 255, 0), 5, 8);
+					}
+					waitKey(1);
+					moveWindow(name2, 1900, 0);
+					resize(frame3, imframe3, Size(), 2, 2);
+					imshow(name2, imframe3);
+
+					end = clock();
+					if (renbu == 1 && ((float)end - start) / CLOCKS_PER_SEC > 5) {
+						onemore_check = 1;
+						timeout = 1;
+						STATUS = 0;
+						renbu = 0;
+						status_flag = 0;
+						destroyAllWindows();
+						break;
+					}
+
+					if (gyima > 0) {
+						gyima = 0;
+						katorea = 0;
+						renbu = 0;
+						sikimi = 0;
+						waitKey(1);
+						destroyAllWindows();
+						onemore_check = 1;
+						timeout = 0;
+						break;
+					}
+					venus++;
+				}
+			}
+			//切り取り領域取得と処理
+			capture >> frame4;
+			Rect roi = vision;
+			Rect roi_origin;
+			int x_weidth = 320, y_height = 300;
+			if (switcher == 0) {
+				roi_origin = Rect(100, 60, 400, 320);//Detection
+			}
+			else {
+				roi_origin = Rect(200, 50, 400, 350);//Detection
+			}
+			Mat tmp2 = frame4(roi).clone();
+			Mat AKAZEimg1 = frame4.clone();
+			Mat tmp_clone = frame4(Rect(200, 120, 245, 205)).clone();
+			Mat edge_roi2, diffedge, dil, dil2;
+
+			if (onemore_flag == 0) {
+				diffedge = Bit_Wise2(tmp, tmp2);
+				medianBlur(diffedge, diffedge, 3);
+				Canny(diffedge, edge_roi2, 50, 100, 3, true);
+			}
+			else {
+				edge_roi2 = decadeimg;
+			}
+			Mat diffedge_copy = edge_roi2.clone();
+
+			int white = 0, White = 0;
+			double per = 0;
+			int turning = 1;
+			white = countNonZero(diffedge_copy);//1000
+			if (white < 1000) {
+				turning = 0;
+				break;
+			}
+
+			int up_flag = 0, down_flag = 0, left_flag = 0, right_flag = 0, stop_flag1 = 0;
+			int in_flag = 0, out_flag = 0, stop_flag2 = 0;
+			int clock = 0;
+			waitKey(500);//0.5秒待つ
+			send_count = 1;
+			Mat matching;
+			Rect fake = Rect(20, 20, frame4.cols - 40, frame4.rows - 40);
+			xb = 250;
+			yb = 150;
+			Mat img1, img2, src, dst, imdst, nodst;
+			Mat img_gry, edge, edge_canny;
+			Mat AKAZEimg2, AKAZEimg4, AKAZEimg99, AKAZEdiff, AKAZEedge;
+			double zheta = 0;
+			int Stuck = 3, Nowstate = 1, State = 1, Stateflag = 0;
+			int hitokage = 0, zenigame = 0, fusigidane = 0;
+			int move_Flag = 0, over_Flag = 0, exit_Flag = 0, inside_Flag = 0;
+			int over_stock = 0, stay_flag = 0;
+			int korai_x = 0, korai_y = 0;
+			int pre_x = 0, pre_y = 0;
+			int kAoM_x = 0, kAoM_y = 0;
+			int AoM_x = 0, AoM_y = 0;
+			int moving = 0;
+			double len = 0, Len = 0;
+			//destroyAllWindows();
+			int Height = frame4.rows;
+			int Width = frame4.cols;
+			Mat source;
+			Mat HIS_source(Height, Width, CV_8UC1);
+			//Mat source2(Height, Width, CV_8UC1);
+			//Mat HIS_source2(Height, Width, CV_8UC1);
+			//Mat copy;
+			HIS_source = HIS_source(Rect(xb, yb, roi.width + 80, roi.height + 60)).clone();
+			Rect roiroi = Rect(xb, yb, roi.width, roi.height);
+			Rect trick = Rect(xb, yb, roi.width + 80, roi.height + 60);
+			Point v = Point(0, 0);
+			Rect range = Rect(xb, yb, 275, 205);
+			//トラッキング
+			if (turning == 1 && timeout == 0) {
+				onemore_check = 0;
+				for (;;) {
+					if (xb > 50 && yb > 30) {
+						trick.x = xb - 50;
+						trick.y = yb - 30;
+					}
+
+					if (xb > 80 && yb > 30) {
+						range.x = xb - 80;
+						range.y = yb - 30;
+					}
+					capture >> img1;
+					capture >> img2;
+					src = img2.clone();
+					AKAZEimg2 = src.clone();
+					Mat AKAZEimg3;
+					AKAZEimg4 = AKAZEimg2.clone();
+					AKAZEimg99 = AKAZEimg2.clone();
+					AKAZEdiff = Bit_Wise2(AKAZEimg1, AKAZEimg2);
+					medianBlur(AKAZEdiff, AKAZEdiff, 3);
+					Canny(AKAZEdiff, AKAZEedge, 50, 100, 3, true);
+					dilate(AKAZEedge, AKAZEedge, Mat(), Point(-1, -1), 5);
+					bitwise_and(AKAZEimg4, AKAZEimg4, AKAZEimg3, AKAZEedge);
+					auto algorithm2 = AKAZE::create();
+					vector<KeyPoint> keypoint1;
+					algorithm2->detect(AKAZEimg3(trick), keypoint1);
+					Mat kp;
+					drawKeypoints(AKAZEimg3(trick), keypoint1, kp, Scalar::all(-1));
+					//imshow("fadegshbg", kp);
+					waitKey(1);
+					int b = keypoint1.size();
+					if (b < 10) {
+						continue;
+					}
+					AKAZEimg1 = AKAZEimg99.clone();
+
+					/***Optical***/
+					capture >> source;
+					source = source(trick).clone();
+					v = Optical(source, HIS_source);
+					cvtColor(source, source, COLOR_RGB2GRAY);
+					HIS_source = source.clone();
+
+					if (v.x > 0 && v.y > 0) {
+						Len = sqrt(pow(v.x - square.x, 2) + pow(v.y - square.y, 2));//状態検知用
+						if (Len < 100) {
+							inside_Flag = 1;
+						}
+					}
+
+					img_gry = Bit_Wise2(img1, img2);
+					edge = img_gry.clone();
+					medianBlur(edge, edge, 3);
+					Canny(edge, edge_canny, 50, 100, 3, true);
+					//templateMatch(edge_canny, diffedge_copy, src);
+					Mat black = Mat::zeros(Size(704, 480), CV_8UC3);
+					Mat mat = (cv::Mat_<double>(2, 3) << 1.0, 0.0, range.x, 0.0, 1.0, range.y);
+					warpAffine(edge_canny(range), black, mat, black.size(), CV_INTER_LINEAR, cv::BORDER_TRANSPARENT);
+					//imshow("ohmygod", black);
+					//waitKey(1);
+					templateMatch(black, diffedge_copy, src);
+					roiroi.x = xb;
+					roiroi.y = yb;
+					if (xb < 120 || yb < 30 || xb>480 || yb > 380) {
+						stay_flag = 1;
+					}
+					else {
+						stay_flag = 0;
+					}
+					White = countNonZero(edge_canny(roiroi));
+					per = (double)White / (double)white;
+					kAoM_x = pre_x - korai_x;
+					AoM_x = xb - pre_x;
+					kAoM_y = pre_y - korai_y;
+					AoM_y = yb - pre_y;
+					if (kAoM_x > 0 && AoM_x > 0) {
+						moving = 1;
+					}
+					else if (kAoM_x < 0 && AoM_x < 0) {
+						moving = 1;
+					}
+					else if (kAoM_y > 0 && AoM_y > 0) {
+						moving = 1;
+					}
+					else if (kAoM_y < 0 && AoM_y < 0) {
+						moving = 1;
+					}
+					else {
+						moving = 0;
+					}
+
+					matching = src(fake).clone();
+					//circle(matching, v, 15, Scalar(0, 255, 0), 3, 8);
+					if (move_Flag == 0) {
+						zheta = three_seg(keypoint1).second;
+					}
+					if (zheta > 28) {
+						zheta += 40;
+					}
+					else if (zheta < 15) {
+						zheta -= 15;
+					}
+
+					if (zheta > 50) {
+						Stuck++;
+					}
+					else {
+						Stuck--;
+					}
+
+					if (Stuck == 6) {
+						if (inside_Flag == 1 && over_stock == 0) {
+							Nowstate = 1;
+						}
+
+					}
+					else if (Stuck == 0) {
+						if (inside_Flag == 1 && over_stock == 0 && stay_flag == 0) {
+							Nowstate = 0;
+						}
+
+					}
+					else {
+						Nowstate = State;
+					}
+
+					if (clock % 3 == 0) {
+						if (zheta > 50) {
+							Stuck = 4;
+						}
+						else {
+							Stuck = 2;
+						}
+						clock++;
+					}
+					State = Nowstate;
+
+					if (Nowstate == 1 && Stateflag == 0) {
+						hitokage = 1;
+						Stateflag = 1;
+					}
+
+					if (Nowstate == 0 && hitokage == 1) {
+						zenigame = 1;
+						hitokage = 0;
+					}
+
+					if (Nowstate == 1 && zenigame == 1) {
+						fusigidane = 1;
+						zenigame = 0;
+					}
+
+					if (fusigidane > 0 && len < 40 && move_Flag == 0 && inside_Flag == 1) {
+						fusigidane = 0;
+						Stateflag = 0;
+						exit_Flag++;
+						diff_Flag = !diff_Flag;
+					}
+
+					rectangle(matching, roi_origin, Scalar(255, 55, 255), 3);
+					if (xb < 20 || xb>460 || yb < 20 || yb>270) {
+						xb = pre_x;
+						yb = pre_y;
+					}
+
+					/*
+					if (switcher == 0) {
+						roiroi.x = xb - 20;
+						roiroi.y = yb - 20;
+					}
+					else {
+						roiroi.x = xb + 20;
+						roiroi.y = yb - 20;
+					}
+					*/
+					len = sqrt(pow(xb - pre_x, 2) + pow(yb - pre_y, 2));//ブレ防止用
+
+					if (len > 50) {
+						over_Flag = 1;
+						//line(matching, Point(xb, yb), Point(pre_x, pre_y), Scalar(0, 200, 255), 3, 4);
+					}
+					else {
+						if (over_Flag == 1) {
+							over_stock = 1;
+						}
+						else {
+							over_stock = 0;
+						}
+						over_Flag = 0;
+						if (Nowstate == 1) {
+							rectangle(matching, roiroi, Scalar(0, 255, 255), 3);
+						}
+						else if (Nowstate == 0) {
+							rectangle(matching, roiroi, Scalar(255, 255, 0), 3);
+						}
+
+					}
+
+
+					if (diff_Flag == 0) {
+						if (switcher == 0) {
+							line(matching, Point(100, 60), Point(100, 380), Scalar(0, 255, 0), 5, 8);
+							line(matching, Point(500, 60), Point(500, 380), Scalar(0, 255, 0), 5, 8);
+							if (over_Flag == 0) {
+								if (xb < 90) {
+									putText(matching, "Left Over", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+									move_Flag = 1;
+									send_count = 3;
+								}
+								else if (xb > 320) {
+									putText(matching, "Right Over", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+									move_Flag = 1;
+									send_count = 4;
+								}
+								else if (yb < 60) {
+									putText(matching, "Up Over", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+									move_Flag = 1;
+									send_count = 5;
+								}
+								else if (yb > 210) {
+									putText(matching, "Down Over", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+									move_Flag = 1;
+									send_count = 6;
+								}
+								else {
+									move_Flag = 0;
+									send_count = 9;
+								}
+							}
+						}
+						else {
+							line(matching, Point(200, 50), Point(200, 400), Scalar(0, 255, 0), 5, 8);
+							line(matching, Point(600, 50), Point(600, 400), Scalar(0, 255, 0), 5, 8);
+							if (over_Flag == 0) {
+								if (xb < 190) {
+									putText(matching, "Left Over", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+									move_Flag = 1;
+								}
+								else if (xb > 420) {
+									putText(matching, "Right Over", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+									move_Flag = 1;
+								}
+								else if (yb < 40) {
+									putText(matching, "Up Over", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+									move_Flag = 1;
+								}
+								else if (yb > 240) {
+									putText(matching, "Down Over", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+									move_Flag = 1;
+								}
+								else {
+									move_Flag = 0;
+								}
+							}
+						}
+					}
+					else {
+						if (switcher == 0) {
+							line(matching, Point(100, 60), Point(500, 60), Scalar(255, 255, 0), 5, 8);
+							line(matching, Point(100, 380), Point(500, 380), Scalar(255, 255, 0), 5, 8);
+							if (over_Flag == 0) {
+								if (xb < 90) {
+									putText(matching, "Zoom Out", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+									move_Flag = 1;
+									send_count = 8;
+								}
+								else if (xb > 320) {
+									putText(matching, "Zoom In", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+									move_Flag = 1;
+									send_count = 7;
+								}
+								else if (yb < 60 || yb>210) {
+									move_Flag = 1;
+								}
+								else {
+									move_Flag = 0;
+									send_count = 9;
+								}
+							}
+						}
+						else {
+							line(matching, Point(200, 50), Point(600, 50), Scalar(255, 255, 0), 5, 8);
+							line(matching, Point(200, 400), Point(600, 400), Scalar(255, 255, 0), 5, 8);
+							if (over_Flag == 0) {
+								if (xb < 190) {
+									putText(matching, "Zoom Out", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+									move_Flag = 1;
+								}
+								else if (xb > 420) {
+									putText(matching, "Zoom In", Point(300, 400), FONT_ITALIC, 1.2, Scalar(255, 200, 100), 2);
+									move_Flag = 1;
+								}
+								else if (yb < 40 || yb>240) {
+									move_Flag = 1;
+								}
+								else {
+									move_Flag = 0;
+								}
+							}
+						}
+					}
+
+					if (move_Flag == 1) {
+						exit_Flag = 0;
+					}
+
+					if (exit_Flag == 2) {
+						destroyAllWindows();
+						onemore_flag = 1;
+						decadeimg = diffedge_copy;
+						STATUS = 0;
+						break;
+					}
+
+					clock++;
+					waitKey(1);
+					moveWindow(name3, 1905, 0);
+					resize(matching, imdst, Size(), 2, 2);
+					imshow(name3, imdst);
+					//imshow("edge", diffedge_copy);
+					korai_x = pre_x;
+					korai_y = pre_y;
+					pre_x = xb;
+					pre_y = yb;
+				}
+			}
+		}
+	}
+	return 0;
+}
+
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrevInst, LPSTR szStr, int iCmdShow)
+{
+	//モーダルダイアログボックスを作成
+
+	DialogBox(
+		hInst,
+		MAKEINTRESOURCE(IDD_DIALOG1),
+		NULL,
+		(DLGPROC)DlgWndProc);
+
+	ShowWindow(hWnd, SW_SHOW);
+	UpdateWindow(hWnd);
+
+	while (GetMessage(&msg, NULL, 0, 0))
+	{
+		TranslateMessage(&msg); // キーボードメッセージを変換する
+		DispatchMessage(&msg);  // 1つのウィンドウプロシージャにメッセージを送る
+	}
+	return msg.wParam;
+	//return 0;
+
+}
